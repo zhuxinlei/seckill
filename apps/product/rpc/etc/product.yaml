@@ -1,0 +1,16 @@
+Name: product.rpc
+ListenOn: 127.0.0.1:9002
+Mode: dev
+Etcd:
+  Hosts:
+  - 127.0.0.1:2379
+  Key: product.rpc
+DataSource: root:12345678@tcp(127.0.0.1:3306)/product?parseTime=true
+CacheRedis:
+  - Host: 127.0.0.1:6379
+    Pass:
+    Type: node
+BizRedis:
+  Host: 127.0.0.1:6379
+  Pass:
+  Type: node
