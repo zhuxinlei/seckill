@@ -1,5 +1,6 @@
-## lebron
-Highly concurrent mall system built on go-zero
+## seckill
+本项目是借鉴lebron的用来学习秒杀系统的项目
+原项目地址请搜索lebron
 
 ## Architecture 
 A busy sum, when there is time to make up for it
