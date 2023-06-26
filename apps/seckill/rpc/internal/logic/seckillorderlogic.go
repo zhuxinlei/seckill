@@ -64,6 +64,8 @@ func NewSeckillOrderLogic(ctx context.Context, svcCtx *svc.ServiceContext, batch
 
 //秒杀的入队操作非常简单，判断缓存中剩余数量是否>0,
 func (l *SeckillOrderLogic) SeckillOrder(in *seckill.SeckillOrderRequest) (*seckill.SeckillOrderResponse, error) {
+	//统计请求数量
+	l.svcCtx.BizRedis.Incr("count")
 	//限流，通过Take方法第一个参数，这里使用有问题，不应该设置userid,设置成userid单个用户限流，无意义
 	x := rand.Intn(50000000)
 	in.UserId = int64(x)

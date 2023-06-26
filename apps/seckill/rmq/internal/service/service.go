@@ -10,6 +10,7 @@ import (
 	goredislib "github.com/go-redis/redis/v8"
 	"github.com/go-redsync/redsync/v4"
 	"github.com/go-redsync/redsync/v4/redis/goredis/v8"
+	"github.com/pkg/errors"
 	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zeromicro/go-zero/zrpc"
 	"github.com/zhoushuguang/lebron/apps/order/rpc/order"
@@ -64,18 +65,22 @@ func NewService(c config.Config) *Service {
 		//s.msgsChan[i] <- &KafkaData{}
 		s.waiter.Add(1)
 
-		//实现秒杀，但没使用分布式事务，极端情况下可能存在多个微服务之间数据不一致问题
+		//1.使用lua脚本，实现了控制超卖。
+		//缺点：没使用分布式事务，存在多个微服务之间数据不一致问题
 		//go s.consume(ch)
 
-		//使用分布式事务，但没有做超卖控制，也就是控制了数据读取
+		//2.使用dtm，实现了分布式事务，但没有做超卖控制
+		//缺点：这里的分布式事务没有意义，因为基本的超卖控制都没有实现
 		//go s.consumeDTM(ch)
 
-		//实现了超卖控制和分布式事务
-		go s.consumeSecAndDtm(ch)
+		//3.使用lua脚本和dtm,实现了超卖控制和分布式事务
+		//go s.consumeSecAndDtm(ch)
 
-		//go s.consumeMutex(ch)
+		//4.使用分布式锁和dtm,实现了控制超卖和分布式事务
+		//缺点：编码比使用lua脚本稍微复杂，分布式锁的实现需要精细的把控
+		go s.consumeMutex(ch)
 
-		//订单15分钟不消费，自动取消
+
 	}
 
 	return s
@@ -121,6 +126,16 @@ func (s *Service)autoCancelOrder()  {
 //使用分布式锁实现资源锁定
 func (s *Service) consumeMutex(ch chan *KafkaData) {
 	defer s.waiter.Done()
+	client := goredislib.NewClient(&goredislib.Options{
+		Addr: "localhost:6379",
+	})
+
+	pool := goredis.NewPool(client)
+	rs := redsync.New(pool)
+	mutexname := "my-global-mutex"
+	mutex := rs.NewMutex(mutexname)
+
+
 	for {
 		m, ok := <-ch
 		if !ok {
@@ -128,37 +143,60 @@ func (s *Service) consumeMutex(ch chan *KafkaData) {
 		}
 		fmt.Printf("consume mutex msg: %+v\n", m)
 
-		//
-		client := goredislib.NewClient(&goredislib.Options{
-			Addr: "localhost:6379",
-		})
+		s.deferConsume(mutex,m)
 
-		pool := goredis.NewPool(client)
-		rs := redsync.New(pool)
-		mutextname := "my-global-mutex"
-		mutex := rs.NewMutex(mutextname)
-
-		if err := mutex.Lock(); err != nil {
-			fmt.Println(err.Error())
-		}
-		defer mutex.Unlock()
-
-		//分布式
-		_,err := s.ProductRPC.CheckProductStock(context.Background(),&product.UpdateProductStockRequest{
-			ProductId: 1,
-			Num:       1,
-		})
-		if err != nil{
-			continue
-		}
-
-
-
-		s.consumeDTMOnce(m)
+		//for循环中不能使用defer，因为我们期望的是在这个逻辑执行完之后就释放锁，
+		//而defer的意思在这个方法执行完的时候才释放，所以会比我们期望的锁的时间更久
 
 	}
 }
 
+func (s *Service) deferConsume(mutex *redsync.Mutex,m *KafkaData) error {
+
+	/*貌似每次都能加锁成功，也就导致没有实现锁定的效果。
+	这里因为是调用setnx实现加锁，而每次都能成功的话，说明锁不存在，那为什么不存在？说明被释放了，但这里
+	就有点说不通了，这是一个for循环，且里面有rpc的查询逻辑，之后才会主动释放锁
+	就拿调用CheckProductStock方法举例，虽然是for循环的并发请求，但理论上因为使用了setnx锁，
+	所以要等到第一次进来的请求查询完之后才会进行第二次查询，但事实是一下子进来了多个请求同时进行查询，why?
+
+	也就是从效果上来说，第一次加锁之后，锁被马上释放掉了，然后第二次加锁，然后锁继续被马上释放掉
+	这里认为CheckProductStock的查询速度是非常非常快的，甚至和for循环的速度相当，当继续往下执行，到了
+	（这里理解错了，CheckProductStock不用执行的多块，事实上也不可能执行的和for循环一样快，事实上这一步
+	的快慢不影响加锁的效果，判断的标准是只要主逻辑没执行完，就释放掉了锁就会出现并发问题
+
+	）
+	consumeDTMOnce，如果为了所谓的性能将他们放到goroutine中执行，此时可以直接执行defer里面的解锁逻辑
+	此时，下一次请求会迅速进入逻辑......所以将主逻辑放入goroutine中是不可取的
+
+	*/
+
+	if err := mutex.Lock(); err != nil {
+		//加锁失败
+		fmt.Println("---------"+err.Error())
+		return nil
+	}
+	defer mutex.Unlock()
+
+	_,err := s.ProductRPC.CheckProductStock(context.Background(),&product.UpdateProductStockRequest{
+		ProductId: 1,
+		Num:       1,
+	})
+
+	if err != nil{
+		fmt.Println("err----------"+err.Error())
+		//库存不足
+		return errors.New("库存不足")
+	}
+	//不能放到goroutine中执行，这样
+	/*go func() {
+		s.consumeDTMOnce(m)
+	}()*/
+	s.consumeDTMOnce(m)
+
+	return nil
+
+
+}
 
 func (s *Service) consume(ch chan *KafkaData) {
 	defer s.waiter.Done()

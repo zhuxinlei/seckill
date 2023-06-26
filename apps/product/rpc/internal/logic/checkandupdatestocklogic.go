@@ -26,14 +26,13 @@ func NewCheckAndUpdateStockLogic(ctx context.Context, svcCtx *svc.ServiceContext
 	}
 }
 
-//--------------------------------------------------import--------------------------------------------------
+//--------------------------------------------------important--------------------------------------------------
 //执行之前先执行命令
 //hmset stock:1 total 10 seckill 0
 //将第一个商品的总量设置成10，秒杀数量初始化为0
-//--------------------------------------------------import--------------------------------------------------
+//--------------------------------------------------important--------------------------------------------------
 const (
 	luaCheckAndUpdateScript = `
-redis.log(redis.LOG_NOTICE, "hello world")
 local counts = redis.call("HMGET", KEYS[1], "total", "seckill")
 local total = tonumber(counts[1])
 local seckill = tonumber(counts[2])
